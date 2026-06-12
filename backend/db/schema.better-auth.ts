@@ -359,3 +359,27 @@ export const userBehaviorRelations = relations(userBehavior, ({ one }) => ({
 
 // categoriesRelations
 // behavior: many(userBehavior)
+
+// UPDATE POSTS SCHEMA (ADD SLUG + CLICKS)
+// /db/schema/posts.ts
+import { pgTable, uuid, text, timestamp, integer } from "drizzle-orm/pg-core";
+
+export const posts = pgTable("posts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+
+  title: text("title").notNull(),
+  slug: text("slug").unique(), // ✅ NEW (SEO)
+
+  description: text("description"),
+  url: text("url").notNull(),
+  imageUrl: text("image_url"),
+
+  source: text("source"),
+  category: text("category"),
+
+  score: integer("score").default(0),
+
+  clicks: integer("clicks").default(0), // ✅ NEW
+
+  createdAt: timestamp("created_at").defaultNow(),
+});
