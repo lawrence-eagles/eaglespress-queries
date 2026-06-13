@@ -188,6 +188,95 @@ export async function batchSummarize(contents: string[]) {
   }
 }
 
+// /services/score.ts
+
+export function calculatePostScore(input: {
+  title: string;
+  content: string;
+  hasImage: boolean;
+}) {
+  let score = 0;
+
+  // longer content = better
+  score += Math.min(input.content.length / 100, 20);
+
+  // title quality
+  if (input.title.length > 20) score += 5;
+
+  // image boost
+  if (input.hasImage) score += 10;
+
+  // freshness boost (implicit via createdAt later)
+
+  return Math.round(score);
+}
+
+// /services/category.ts
+import { db } from "@/db";
+import { sql } from "drizzle-orm";
+
+// =========================
+// 🔑 KEYWORDS
+// =========================
+const CATEGORY_KEYWORDS: Record<string, string[]> = {
+  Technology: ["ai", "tech", "software", "startup", "mobile"],
+  Business: ["market", "finance", "economy", "stock"],
+  Politics: ["election", "government", "policy"],
+  Health: ["covid", "health", "medicine"],
+};
+
+// =========================
+// 🔑 HELPERS
+// =========================
+function slugify(text: string) {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^\w\s-]/g, "") // remove special chars
+    .replace(/\s+/g, "-"); // spaces -> dash
+}
+
+// =========================
+// 🚀 MAIN FUNCTION
+// =========================
+export async function detectCategoryId(text: string): Promise<string> {
+  const lower = text.toLowerCase();
+
+  let bestCategory = "General";
+  let bestScore = 0;
+
+  // =========================
+  // 1. CLASSIFY
+  // =========================
+  for (const [category, keywords] of Object.entries(CATEGORY_KEYWORDS)) {
+    let score = 0;
+
+    for (const word of keywords) {
+      if (lower.includes(word)) score++;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestCategory = category;
+    }
+  }
+
+  const slug = slugify(bestCategory);
+
+  // =========================
+  // 2. UPSERT (ATOMIC)
+  // =========================
+  const result = await db.execute(sql`
+    INSERT INTO categories (name, slug)
+    VALUES (${bestCategory}, ${slug})
+    ON CONFLICT (name)
+    DO UPDATE SET name = EXCLUDED.name
+    RETURNING id;
+  `);
+
+  return result.rows[0].id;
+}
+
 // /services/fetchNews.ts
 import { inngest } from "@/lib/inngest";
 import Parser from "rss-parser";

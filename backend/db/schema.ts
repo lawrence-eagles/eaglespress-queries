@@ -47,60 +47,6 @@ export const posts = pgTable("posts", {
   createdAt: timestamp("created_at").defaultNow(),
 });
 
-// posts table with indexes
-import {
-  pgTable,
-  uuid,
-  text,
-  integer,
-  timestamp,
-  index,
-} from "drizzle-orm/pg-core";
-// import { sources } from "./sources";
-// import { categories } from "./categories";
-
-export const posts = pgTable(
-  "posts",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-
-    title: text("title").notNull(),
-    slug: text("slug").notNull(),
-    description: text("description"),
-    url: text("url").notNull(),
-    imageUrl: text("image_url"),
-
-    sourceId: uuid("source_id").references(() => sources.id),
-    categoryId: uuid("category_id").references(() => categories.id),
-
-    score: integer("score").default(0),
-
-    createdAt: timestamp("created_at").defaultNow(),
-  },
-  (table) => ({
-    // 🔥 Core feed performance
-    idxPostsTrending: index("idx_posts_trending").on(
-      table.score,
-      table.createdAt,
-      table.id,
-    ),
-
-    // 🔥 Sorting fallback
-    idxPostsCreatedAtId: index("idx_posts_created_at_id").on(
-      table.createdAt,
-      table.id,
-    ),
-
-    // 🔥 Joins
-    idxPostsCategoryId: index("idx_posts_category_id").on(table.categoryId),
-
-    idxPostsSourceId: index("idx_posts_source_id").on(table.sourceId),
-
-    // 🔥 Optional (high traffic)
-    idxPostsScore: index("idx_posts_score").on(table.score),
-  }),
-);
-
 // Category table
 export const categories = pgTable("categories", {
   id: uuid("id").primaryKey().defaultRandom(),

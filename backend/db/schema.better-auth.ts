@@ -33,24 +33,59 @@ export const user = pgTable("user", {
 
 // Posts Table
 // db/schema/posts.ts
-import { pgTable, uuid, text, timestamp, integer } from "drizzle-orm/pg-core";
+// posts table with indexes
+import {
+  pgTable,
+  uuid,
+  text,
+  integer,
+  timestamp,
+  index,
+} from "drizzle-orm/pg-core";
+// import { sources } from "./sources";
+// import { categories } from "./categories";
 
-export const posts = pgTable("posts", {
-  id: uuid("id").primaryKey().defaultRandom(),
+export const posts = pgTable(
+  "posts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
 
-  title: text("title").notNull(),
-  description: text("description"),
-  url: text("url").notNull(),
-  imageUrl: text("image_url"),
+    title: text("title").notNull(),
+    slug: text("slug").notNull(),
+    description: text("description"),
+    url: text("url").notNull(),
+    imageUrl: text("image_url"),
 
-  sourceId: uuid("source_id").references(() => sources.id),
+    sourceId: uuid("source_id").references(() => sources.id),
+    categoryId: uuid("category_id").references(() => categories.id),
 
-  categoryId: uuid("category_id").references(() => categories.id),
+    score: integer("score").default(0),
 
-  score: integer("score").default(0),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    // 🔥 Core feed performance
+    idxPostsTrending: index("idx_posts_trending").on(
+      table.score,
+      table.createdAt,
+      table.id,
+    ),
 
-  createdAt: timestamp("created_at").defaultNow(),
-});
+    // 🔥 Sorting fallback
+    idxPostsCreatedAtId: index("idx_posts_created_at_id").on(
+      table.createdAt,
+      table.id,
+    ),
+
+    // 🔥 Joins
+    idxPostsCategoryId: index("idx_posts_category_id").on(table.categoryId),
+
+    idxPostsSourceId: index("idx_posts_source_id").on(table.sourceId),
+
+    // 🔥 Optional (high traffic)
+    idxPostsScore: index("idx_posts_score").on(table.score),
+  }),
+);
 
 // Source Table
 // db/schema/sources.ts
@@ -58,10 +93,8 @@ import { pgTable, uuid, text } from "drizzle-orm/pg-core";
 
 export const sources = pgTable("sources", {
   id: uuid("id").primaryKey().defaultRandom(),
-
   name: text("name").notNull(),
-  url: text("url"),
-  logoUrl: text("logo_url"),
+  url: text("url").notNull().unique(),
 });
 
 // Category table

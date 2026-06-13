@@ -21,3 +21,4 @@
 17. Get the user onboarding route ready - to enable users select category of choice
 18. Get better auth setup completely - email/password, google authentication, forget password, and maybe email verification
 19. Get the interest route - this route displays the list of all categories and enables the user to follow or unfollow a category as he/she wills
+20. Generate a list of categories and their lookup keywords for Eaglespress
