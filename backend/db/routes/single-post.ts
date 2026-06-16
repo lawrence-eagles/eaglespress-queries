@@ -1,24 +1,3 @@
-// NOTE THIS REDIS SETUP IS GLOBAL
-// NOTE THE REDIS SETUP BELOW IS GLOBAL
-// /lib/redis.ts Redis setup
-import { createClient } from "redis";
-
-export const redis = createClient({
-  url: process.env.REDIS_URL,
-});
-
-await redis.connect();
-
-// BUILD CACHE KEY FUNCTION
-// /utils/cache.ts
-/**
- * Build Redis cache key for single post
- */
-export function buildPostCacheKey(slug: string) {
-  return `post:${slug}`;
-}
-
-// EXPRESS ROUTER FOR SINGLE POST FINAL VERSION WITH BUG FIXES FOR CATEGORRY ID AND USER_BEHAVIOR ID
 // /routes/posts.ts
 
 import { Router } from "express";
@@ -60,7 +39,6 @@ async function trackClick(
   }
 }
 
-// fire-and-forget wrapper (prevents unhandled rejection)
 function trackClickAsync(
   postId: string,
   userId: string | null,
@@ -87,87 +65,129 @@ router.get("/:slug", async (req, res) => {
     // 1. CACHE
     // =========================
     const cached = await redis.get(cacheKey);
+    let basePost: any;
 
     if (cached) {
-      const post = JSON.parse(cached);
+      basePost = JSON.parse(cached);
+    } else {
+      // =========================
+      // 2. FETCH POST
+      // =========================
+      const result = await db.execute(sql`
+        SELECT 
+          p.id,
+          p.title,
+          p.slug,
+          p.image_url,
+          p.description,
+          p.url,
+          p.clicks,
+          p.category_id,
+          p.source_id,
 
-      trackClickAsync(post.id, userId, post.categoryId);
+          p.likes_count,
+          p.comments_count,
 
-      return res.json(post);
+          c.name as category_name,
+
+          s.name as source_name,
+          s.url as source_website
+
+        FROM posts p
+
+        LEFT JOIN categories c 
+          ON p.category_id = c.id
+
+        LEFT JOIN sources s
+          ON p.source_id = s.id
+
+        WHERE p.slug = ${slug}
+        LIMIT 1
+      `);
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: "Post not found" });
+      }
+
+      const p = result.rows[0];
+
+      basePost = {
+        id: p.id,
+        title: p.title,
+        slug: p.slug,
+        imageUrl: p.image_url,
+        summary: p.description,
+        sourceUrl: p.url,
+
+        category: p.category_name,
+        categoryId: p.category_id,
+
+        sourceName: p.source_name,
+        sourceWebsite: p.source_website,
+
+        likesCount: Number(p.likes_count) || 0,
+        commentsCount: Number(p.comments_count) || 0,
+      };
+
+      // cache only base post
+      if ((p.clicks ?? 0) > 10) {
+        await redis.set(cacheKey, JSON.stringify(basePost), {
+          EX: 300,
+        });
+      }
     }
 
     // =========================
-    // 2. FETCH POST (FIXED JOIN)
+    // 3. USER FLAGS
     // =========================
-    const result = await db.execute(sql`
-      SELECT 
-        p.id,
-        p.title,
-        p.slug,
-        p.image_url,
-        p.description,
-        p.url,
-        p.clicks,
-        p.category_id,
-        p.source_id,
+    let isLiked = false;
+    let isBookmarked = false;
+    let isFollowingCategory = false;
 
-        c.name as category_name,
+    if (userId) {
+      const flags = await db.execute(sql`
+        SELECT
+          EXISTS (
+            SELECT 1 FROM likes l
+            WHERE l.post_id = ${basePost.id}
+            AND l.user_id = ${userId}
+          ) AS liked,
 
-        s.name as source_name,
-        s.url as source_website
+          EXISTS (
+            SELECT 1 FROM bookmarks b
+            WHERE b.post_id = ${basePost.id}
+            AND b.user_id = ${userId}
+          ) AS bookmarked,
 
-      FROM posts p
+          EXISTS (
+            SELECT 1 FROM follows f
+            WHERE f.category_id = ${basePost.categoryId}
+            AND f.user_id = ${userId}
+          ) AS following
+      `);
 
-      LEFT JOIN categories c 
-        ON p.category_id = c.id
+      const f = flags.rows[0];
 
-      LEFT JOIN sources s
-        ON p.source_id = s.id
-
-      WHERE p.slug = ${slug}
-      LIMIT 1
-    `);
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Post not found" });
-    }
-
-    const p = result.rows[0];
-
-    // =========================
-    // 3. RESPONSE (UPDATED)
-    // =========================
-    const response = {
-      id: p.id,
-      title: p.title,
-      slug: p.slug,
-      imageUrl: p.image_url,
-      summary: p.description,
-      sourceUrl: p.url, // article URL
-
-      category: p.category_name,
-      categoryId: p.category_id,
-
-      // ✅ NEW FIELDS
-      sourceName: p.source_name,
-      sourceWebsite: p.source_website,
-    };
-
-    // =========================
-    // 4. CACHE HOT POSTS
-    // =========================
-    if ((p.clicks ?? 0) > 10) {
-      await redis.set(cacheKey, JSON.stringify(response), {
-        EX: 300,
-      });
+      // 🔥 SAFE BOOLEAN CAST
+      isLiked = f?.liked === true || f?.liked === "t";
+      isBookmarked = f?.bookmarked === true || f?.bookmarked === "t";
+      isFollowingCategory = f?.following === true || f?.following === "t";
     }
 
     // =========================
-    // 5. TRACK (SAFE)
+    // 4. TRACK
     // =========================
-    trackClickAsync(p.id, userId, p.category_id);
+    trackClickAsync(basePost.id, userId, basePost.categoryId);
 
-    return res.json(response);
+    // =========================
+    // 5. RESPONSE
+    // =========================
+    return res.json({
+      ...basePost,
+      isLiked,
+      isBookmarked,
+      isFollowingCategory,
+    });
   } catch (err) {
     console.error("GET POST ERROR:", err);
     return res.status(500).json({ error: "Server error" });

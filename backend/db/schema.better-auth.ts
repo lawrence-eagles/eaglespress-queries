@@ -13,7 +13,17 @@
 
 // User Table
 // db/schema/user.ts
-import { pgTable, text, timestamp, jsonb } from "drizzle-orm/pg-core";
+import {
+  pgTable,
+  text,
+  timestamp,
+  jsonb,
+  uuid,
+  integer,
+  index,
+  primaryKey,
+} from "drizzle-orm/pg-core";
+import { relations } from "drizzle-orm";
 
 export const user = pgTable("user", {
   id: text("id").primaryKey(), // from Better Auth
@@ -34,17 +44,6 @@ export const user = pgTable("user", {
 // Posts Table
 // db/schema/posts.ts
 // posts table with indexes
-import {
-  pgTable,
-  uuid,
-  text,
-  integer,
-  timestamp,
-  index,
-} from "drizzle-orm/pg-core";
-// import { sources } from "./sources";
-// import { categories } from "./categories";
-
 export const posts = pgTable(
   "posts",
   {
@@ -61,36 +60,29 @@ export const posts = pgTable(
 
     score: integer("score").default(0),
 
+    // 🔥 MATERIALIZED COUNTERS
+    likesCount: integer("likes_count").default(0),
+    commentsCount: integer("comments_count").default(0),
+
     createdAt: timestamp("created_at").defaultNow(),
   },
-  (table) => ({
-    // 🔥 Core feed performance
+  (t) => ({
     idxPostsTrending: index("idx_posts_trending").on(
-      table.score,
-      table.createdAt,
-      table.id,
+      t.score,
+      t.createdAt,
+      t.id,
     ),
 
-    // 🔥 Sorting fallback
-    idxPostsCreatedAtId: index("idx_posts_created_at_id").on(
-      table.createdAt,
-      table.id,
-    ),
+    idxPostsCreatedAtId: index("idx_posts_created_at_id").on(t.createdAt, t.id),
 
-    // 🔥 Joins
-    idxPostsCategoryId: index("idx_posts_category_id").on(table.categoryId),
-
-    idxPostsSourceId: index("idx_posts_source_id").on(table.sourceId),
-
-    // 🔥 Optional (high traffic)
-    idxPostsScore: index("idx_posts_score").on(table.score),
+    idxPostsCategoryId: index("idx_posts_category_id").on(t.categoryId),
+    idxPostsSourceId: index("idx_posts_source_id").on(t.sourceId),
+    idxPostsScore: index("idx_posts_score").on(t.score),
   }),
 );
 
 // Source Table
 // db/schema/sources.ts
-import { pgTable, uuid, text } from "drizzle-orm/pg-core";
-
 export const sources = pgTable("sources", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
@@ -115,65 +107,97 @@ export const categories = pgTable(
   }),
 );
 
-// Likes Table
+// /db/schema/interactions.ts
+
+// Optional (Highly Recommended Upgrades)
+// 1. Add comment threading index
+// index("idx_comments_parent_id").on(t.parentId)
+// 2. Add createdAt index (for sorting comments)
+// index("idx_comments_post_created").on(t.postId, t.createdAt)
+// WHEN PROMPTING CLAUDE REMEMBER TO TELL IT TO ADD ALL NECESSARY INDEXES
+// =========================
+// ❤️ LIKES TABLE
+// =========================
 export const likes = pgTable(
   "likes",
   {
     userId: text("user_id")
       .notNull()
-      .references(() => user.id),
+      .references(() => user.id, { onDelete: "cascade" }),
 
     postId: uuid("post_id")
       .notNull()
-      .references(() => posts.id),
+      .references(() => posts.id, { onDelete: "cascade" }),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.userId, t.postId] }),
+
+    idxLikesPostId: index("idx_likes_post_id").on(t.postId),
+    idxLikesUserPost: index("idx_likes_user_post").on(t.userId, t.postId),
   }),
 );
 
-// Bookmark Table
-// db/schema/bookmarks.ts
-import { pgTable, text, uuid, primaryKey } from "drizzle-orm/pg-core";
-import { user } from "./user";
-import { posts } from "./posts";
-
+// =========================
+// 🔖 BOOKMARKS TABLE
+// =========================
 export const bookmarks = pgTable(
   "bookmarks",
   {
     userId: text("user_id")
       .notNull()
-      .references(() => user.id),
+      .references(() => user.id, { onDelete: "cascade" }),
 
     postId: uuid("post_id")
       .notNull()
-      .references(() => posts.id),
+      .references(() => posts.id, { onDelete: "cascade" }),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.userId, t.postId] }),
+
+    idxBookmarksUserPost: index("idx_bookmarks_user_post").on(
+      t.userId,
+      t.postId,
+    ),
   }),
 );
 
-// Comments Table
-export const comments = pgTable("comments", {
-  id: uuid("id").primaryKey().defaultRandom(),
+// =========================
+// 💬 COMMENTS TABLE
+// =========================
+export const comments = pgTable(
+  "comments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
 
-  content: text("content").notNull(),
+    content: text("content").notNull(),
 
-  userId: text("user_id").references(() => user.id),
-  postId: uuid("post_id").references(() => posts.id),
+    userId: text("user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
 
-  parentId: uuid("parent_id"),
+    postId: uuid("post_id").references(() => posts.id, {
+      onDelete: "cascade",
+    }),
 
-  createdAt: timestamp("created_at").defaultNow(),
-});
+    parentId: uuid("parent_id"),
+
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (t) => ({
+    idxCommentsPostId: index("idx_comments_post_id").on(t.postId),
+
+    // 🔥 NEW
+    idxCommentsParentId: index("idx_comments_parent_id").on(t.parentId),
+
+    idxCommentsPostCreated: index("idx_comments_post_created").on(
+      t.postId,
+      t.createdAt,
+    ),
+  }),
+);
 
 // Follows Table
 // db/schema/follows.ts
-import { pgTable, text, uuid, primaryKey } from "drizzle-orm/pg-core";
-import { user } from "./user";
-import { categories } from "./categories";
-
 export const follows = pgTable(
   "follows",
   {
@@ -187,15 +211,17 @@ export const follows = pgTable(
   },
   (t) => ({
     pk: primaryKey({ columns: [t.userId, t.categoryId] }),
+
+    // 🔥 ADD THIS
+    idxFollowsCategoryUser: index("idx_follows_category_user").on(
+      t.categoryId,
+      t.userId,
+    ),
   }),
 );
 
 // User behaviour Table
 // db/schema/userBehavior.ts
-import { pgTable, text, uuid, integer, primaryKey } from "drizzle-orm/pg-core";
-import { user } from "./user";
-import { categories } from "./categories";
-
 export const userBehavior = pgTable(
   "user_behavior",
   {
@@ -210,15 +236,23 @@ export const userBehavior = pgTable(
     score: integer("score").default(0),
   },
   (t) => ({
+    // ✅ Composite Primary Key
     pk: primaryKey({ columns: [t.userId, t.categoryId] }),
+
+    // ✅ Index for fast JOINs (your requested one)
+    idxCategoryUser: index("idx_user_behavior_category_user").on(
+      t.categoryId,
+      t.userId,
+    ),
   }),
 );
+
+// ADD THE INDEX BELOW TO USER_BEHAVIOR TABLE
+// index("idx_user_behavior_category").on(t.categoryId)
 
 // Relations
 
 // User Relations
-import { relations } from "drizzle-orm";
-
 export const userRelations = relations(user, ({ many }) => ({
   likes: many(likes),
   bookmarks: many(bookmarks),
@@ -317,11 +351,6 @@ export const commentsRelations = relations(comments, ({ one, many }) => ({
 
 // Bookmark Relations
 // db/relations/bookmarks.ts
-import { relations } from "drizzle-orm";
-import { bookmarks } from "../schema/bookmarks";
-import { user } from "../schema/user";
-import { posts } from "../schema/posts";
-
 export const bookmarksRelations = relations(bookmarks, ({ one }) => ({
   user: one(user, {
     fields: [bookmarks.userId],
@@ -343,11 +372,6 @@ export const bookmarksRelations = relations(bookmarks, ({ one }) => ({
 
 // Follows Relations
 // db/relations/follows.ts
-import { relations } from "drizzle-orm";
-import { follows } from "../schema/follows";
-import { user } from "../schema/user";
-import { categories } from "../schema/categories";
-
 export const followsRelations = relations(follows, ({ one }) => ({
   user: one(user, {
     fields: [follows.userId],
@@ -369,11 +393,6 @@ export const followsRelations = relations(follows, ({ one }) => ({
 
 // user Behavior Relation
 // db/relations/userBehavior.ts
-import { relations } from "drizzle-orm";
-import { userBehavior } from "../schema/userBehavior";
-import { user } from "../schema/user";
-import { categories } from "../schema/categories";
-
 export const userBehaviorRelations = relations(userBehavior, ({ one }) => ({
   user: one(user, {
     fields: [userBehavior.userId],
@@ -392,27 +411,3 @@ export const userBehaviorRelations = relations(userBehavior, ({ one }) => ({
 
 // categoriesRelations
 // behavior: many(userBehavior)
-
-// UPDATE POSTS SCHEMA (ADD SLUG + CLICKS)
-// /db/schema/posts.ts
-import { pgTable, uuid, text, timestamp, integer } from "drizzle-orm/pg-core";
-
-export const posts = pgTable("posts", {
-  id: uuid("id").primaryKey().defaultRandom(),
-
-  title: text("title").notNull(),
-  slug: text("slug").unique(), // ✅ NEW (SEO)
-
-  description: text("description"),
-  url: text("url").notNull(),
-  imageUrl: text("image_url"),
-
-  source: text("source"),
-  category: text("category"),
-
-  score: integer("score").default(0),
-
-  clicks: integer("clicks").default(0), // ✅ NEW
-
-  createdAt: timestamp("created_at").defaultNow(),
-});

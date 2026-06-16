@@ -22,3 +22,50 @@
 18. Get better auth setup completely - email/password, google authentication, forget password, and maybe email verification
 19. Get the interest route - this route displays the list of all categories and enables the user to follow or unfollow a category as he/she wills
 20. Generate a list of categories and their lookup keywords for Eaglespress
+
+// CLAUDE PROMPTING ALWAYS REMEMBER TO TELL IT TO USE NODE-REDIS, use axios through out,
+
+// WHAT EACH POST IN THE POST FEED CONTAINS (POSTS IN THE TRENDING, BOOKMARK, FOLLOWING USE THIS FORMAT)
+
+1. Title
+2. Slug
+3. Image
+4. Source Name
+5. Source URL
+6. Category Name
+7. Publication date
+8. isLike to know if the current user already like the post
+9. Total number of likes
+10. Total number of comments
+11. isBookmarked to know if the current user already bookmark the post
+
+// WHAT A SINGLE POST CONTAINS
+
+1. Title
+2. Slug
+3. Image
+4. Source Name
+5. Source URL
+6. Category Name
+7. Publication date
+8. isLIke to know if the current user already like the post
+9. Total number of likes
+10. isBookmarked to know if the current user already bookmark the post
+11. isFollow to know if the current user follow the category
+12. Total number of users following that category
+<!-- 13. Return all comments for that post including their replies -->
+13. Total number of comments that post have
+14. update post.count by 2
+15. update user_behaviour.count by 2
+
+// NOTE COMMENT HAVE THEIR OWN TABLE AND YOU TIE THEM TO POSTS USING QUERY STRING. IN THE FRONTEND YOU MAKE TWO API REQUEST WHEN YOU FETCH A POST AND ITS COMMENTS.
+
+<!-- useEffect(() => {
+  fetch(`/api/posts/${postId}`)
+    .then(res => res.json())
+    .then(setPost);
+
+  fetch(`/api/comments?postId=${postId}`)
+    .then(res => res.json())
+    .then(setComments);
+}, [postId]); -->

@@ -1,9 +1,3 @@
-// FEED PERSONALIZATION ("FOR YOU") SECTION WITH CUSOR BASED PAGINATION
-// PRODUCTION READY FINAL VERSION WITH BUG FIXES FOR CATEGORY ID AND USER_BEHAVIOR ID
-// /routes/feed.ts
-
-// /routes/feed.ts
-
 import { Router } from "express";
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
@@ -14,11 +8,12 @@ const router = Router();
 const PAGE_SIZE = 20;
 
 // =========================
-// 🔑 CURSOR
+// 🔑 CURSOR (STABLE)
 // =========================
 type Cursor = {
   score: number;
   createdAt: string;
+  id: string;
 };
 
 function encodeCursor(cursor: Cursor) {
@@ -30,25 +25,26 @@ function decodeCursor(cursor: string): Cursor {
 }
 
 // =========================
-// 🔑 CACHE KEY
+// 🔑 CACHE KEY (IMPROVED)
 // =========================
 function buildFeedKey(userId: string, cursor: string | null) {
-  return `feed:for-you:${userId}:${cursor ?? "start"}`;
+  return cursor ? `feed:${userId}:cursor:${cursor}` : `feed:${userId}:start`;
 }
 
 // =========================
-// 📊 RANKING (STABLE)
+// 📊 RANKING (FIXED PRECISION)
 // =========================
-const rankingExpr = sql`
+const rankingExpr = sql<number>`
 (
   COALESCE(ub.score, 0) * 5 +
-  COALESCE(p.score, 0) * 2 -
-  EXTRACT(EPOCH FROM NOW() - p.created_at) * 0.0001
+  COALESCE(p.score, 0) * 2 +
+  CASE WHEN f.user_id IS NOT NULL THEN 3 ELSE 0 END -
+  FLOOR(EXTRACT(EPOCH FROM NOW() - p.created_at)) * 0.0001
 )
 `;
 
 // =========================
-// 🚀 FEED ROUTE
+// 🚀 ROUTE
 // =========================
 router.get("/", async (req, res) => {
   try {
@@ -83,7 +79,7 @@ router.get("/", async (req, res) => {
     }
 
     // =========================
-    // 3. QUERY (FULLY FIXED)
+    // 3. QUERY (OPTIMIZED)
     // =========================
     const query = sql`
       WITH ranked_posts AS (
@@ -98,6 +94,9 @@ router.get("/", async (req, res) => {
           p.category_id,
           p.source_id,
 
+          p.likes_count,
+          p.comments_count,
+
           c.name as category,
           s.name as source_name,
           s.url as source_url,
@@ -110,6 +109,10 @@ router.get("/", async (req, res) => {
           ON ub.category_id = p.category_id
           AND ub.user_id = ${userId}
 
+        LEFT JOIN follows f
+          ON f.category_id = p.category_id
+          AND f.user_id = ${userId}
+
         LEFT JOIN categories c
           ON c.id = p.category_id
 
@@ -117,26 +120,44 @@ router.get("/", async (req, res) => {
           ON s.id = p.source_id
       )
 
-      SELECT *
-      FROM ranked_posts
+      SELECT 
+        rp.*,
+
+        EXISTS (
+          SELECT 1 FROM likes l
+          WHERE l.post_id = rp.id AND l.user_id = ${userId}
+        ) as user_liked,
+
+        EXISTS (
+          SELECT 1 FROM bookmarks b
+          WHERE b.post_id = rp.id AND b.user_id = ${userId}
+        ) as user_bookmarked
+
+      FROM ranked_posts rp
+
       ${
         cursor
           ? sql`
-        WHERE
-          (
-            rank_score < ${cursor.score}
-            OR (
-              rank_score = ${cursor.score}
-              AND created_at < ${cursor.createdAt}
-            )
+        WHERE (
+          rp.rank_score < ${cursor.score}
+          OR (
+            rp.rank_score = ${cursor.score}
+            AND rp.created_at < ${cursor.createdAt}::timestamp
           )
+          OR (
+            rp.rank_score = ${cursor.score}
+            AND rp.created_at = ${cursor.createdAt}::timestamp
+            AND rp.id < ${cursor.id}
+          )
+        )
       `
           : sql``
       }
 
       ORDER BY
-        rank_score DESC,
-        created_at DESC
+        rp.rank_score DESC,
+        rp.created_at DESC,
+        rp.id DESC
 
       LIMIT ${PAGE_SIZE}
     `;
@@ -158,13 +179,18 @@ router.get("/", async (req, res) => {
       category: p.category,
       categoryId: p.category_id,
 
-      // ✅ NEW
       sourceName: p.source_name,
       sourceWebsite: p.source_url,
+
+      likesCount: Number(p.likes_count) || 0,
+      commentsCount: Number(p.comments_count) || 0,
+
+      isLiked: p.user_liked,
+      isBookmarked: p.user_bookmarked,
     }));
 
     // =========================
-    // 5. NEXT CURSOR
+    // 5. NEXT CURSOR (FIXED)
     // =========================
     let nextCursor: string | null = null;
 
@@ -173,7 +199,8 @@ router.get("/", async (req, res) => {
 
       nextCursor = encodeCursor({
         score: Number(last.rank_score),
-        createdAt: last.created_at,
+        createdAt: new Date(last.created_at).toISOString(),
+        id: last.id,
       });
     }
 
@@ -186,7 +213,7 @@ router.get("/", async (req, res) => {
     // 6. CACHE (SHORT TTL)
     // =========================
     await redis.set(cacheKey, JSON.stringify(response), {
-      EX: 60,
+      EX: 30, // 🔥 shorter = fresher feed
     });
 
     return res.json(response);

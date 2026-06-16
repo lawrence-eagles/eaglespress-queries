@@ -6,12 +6,13 @@ import { redis } from "@/lib/redis";
 const router = Router();
 
 const PAGE_SIZE = 20;
+const CACHE_TTL = 30; // shorter = fresher feed
 
 // =========================
-// 🔑 CURSOR (FINAL SAFE)
+// 🔑 CURSOR (SAFE)
 // =========================
 type Cursor = {
-  score: number;
+  score: string; // 🔥 use string to avoid float issues
   createdAt: string;
   id: string;
 };
@@ -25,10 +26,13 @@ function decodeCursor(cursor: string): Cursor {
 }
 
 // =========================
-// 🔑 CACHE KEY
+// 🔑 CACHE KEY (FIXED)
 // =========================
 function buildTrendingKey(cursor: string | null) {
-  return `feed:trending:${cursor ?? "start"}`;
+  // only cache FIRST PAGE (critical)
+  if (!cursor) return "feed:trending:first";
+
+  return `feed:trending:cursor:${cursor}`;
 }
 
 // =========================
@@ -36,16 +40,18 @@ function buildTrendingKey(cursor: string | null) {
 // =========================
 router.get("/", async (req, res) => {
   try {
-    const cursorParam = req.query.cursor as string | null;
+    const cursorParam = (req.query.cursor as string) || null;
 
     const cacheKey = buildTrendingKey(cursorParam);
 
     // =========================
-    // 1. CACHE
+    // 1. CACHE (ONLY FIRST PAGE)
     // =========================
-    const cached = await redis.get(cacheKey);
-    if (cached) {
-      return res.json(JSON.parse(cached));
+    if (!cursorParam) {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        return res.json(JSON.parse(cached));
+      }
     }
 
     // =========================
@@ -62,56 +68,60 @@ router.get("/", async (req, res) => {
     }
 
     // =========================
-    // 3. QUERY (OPTIMIZED)
+    // 3. QUERY (INDEX-FRIENDLY)
     // =========================
     const query = sql`
-      WITH ranked_posts AS (
-        SELECT 
-          p.id,
-          p.title,
-          p.slug,
-          p.image_url,
-          p.description,
-          p.url,
-          p.created_at,
-          p.category_id,
-          p.source_id,
+      SELECT 
+        p.id,
+        p.title,
+        p.slug,
+        p.image_url,
+        p.description,
+        p.url,
+        p.created_at,
+        p.category_id,
+        p.source_id,
 
-          c.name as category_name,
+        c.name as category_name,
 
-          s.name as source_name,
-          s.url as source_website,
+        s.name as source_name,
+        s.url as source_website,
 
-          (
-            (COALESCE(p.score, 0) * 3)
-            - EXTRACT(EPOCH FROM NOW() - p.created_at) * 0.0001
-          ) AS trend_score
+        (
+          (COALESCE(p.score, 0) * 3)
+          - EXTRACT(EPOCH FROM NOW() - COALESCE(p.created_at, NOW())) * 0.0001
+        ) AS trend_score
 
-        FROM posts p
+      FROM posts p
 
-        LEFT JOIN categories c
-          ON c.id = p.category_id
+      LEFT JOIN categories c
+        ON c.id = p.category_id
 
-        LEFT JOIN sources s
-          ON s.id = p.source_id
-      )
-
-      SELECT *
-      FROM ranked_posts
+      LEFT JOIN sources s
+        ON s.id = p.source_id
 
       ${
         cursor
           ? sql`
         WHERE (
-          trend_score < ${cursor.score}
+          (
+            (COALESCE(p.score, 0) * 3)
+            - EXTRACT(EPOCH FROM NOW() - COALESCE(p.created_at, NOW())) * 0.0001
+          ) < ${cursor.score}::float
           OR (
-            trend_score = ${cursor.score}
-            AND created_at < ${cursor.createdAt}
+            (
+              (COALESCE(p.score, 0) * 3)
+              - EXTRACT(EPOCH FROM NOW() - COALESCE(p.created_at, NOW())) * 0.0001
+            ) = ${cursor.score}::float
+            AND p.created_at < ${cursor.createdAt}::timestamp
           )
           OR (
-            trend_score = ${cursor.score}
-            AND created_at = ${cursor.createdAt}
-            AND id < ${cursor.id}
+            (
+              (COALESCE(p.score, 0) * 3)
+              - EXTRACT(EPOCH FROM NOW() - COALESCE(p.created_at, NOW())) * 0.0001
+            ) = ${cursor.score}::float
+            AND p.created_at = ${cursor.createdAt}::timestamp
+            AND p.id < ${cursor.id}::uuid
           )
         )
       `
@@ -120,8 +130,8 @@ router.get("/", async (req, res) => {
 
       ORDER BY
         trend_score DESC,
-        created_at DESC,
-        id DESC
+        p.created_at DESC,
+        p.id DESC
 
       LIMIT ${PAGE_SIZE}
     `;
@@ -139,7 +149,7 @@ router.get("/", async (req, res) => {
       summary: p.description,
       sourceUrl: p.url,
 
-      createdAt: p.created_at,
+      createdAt: new Date(p.created_at).toISOString(), // 🔥 normalize
 
       category: p.category_name,
       categoryId: p.category_id,
@@ -149,16 +159,16 @@ router.get("/", async (req, res) => {
     }));
 
     // =========================
-    // 5. NEXT CURSOR (SAFE)
+    // 5. NEXT CURSOR (FIXED)
     // =========================
     let nextCursor: string | null = null;
 
-    if (result.rows.length > 0) {
+    if (result.rows.length === PAGE_SIZE) {
       const last = result.rows[result.rows.length - 1];
 
       nextCursor = encodeCursor({
-        score: Number(last.trend_score),
-        createdAt: last.created_at,
+        score: String(last.trend_score), // 🔥 keep as string
+        createdAt: new Date(last.created_at).toISOString(),
         id: last.id,
       });
     }
@@ -169,11 +179,13 @@ router.get("/", async (req, res) => {
     };
 
     // =========================
-    // 6. CACHE
+    // 6. CACHE (ONLY FIRST PAGE)
     // =========================
-    await redis.set(cacheKey, JSON.stringify(response), {
-      EX: 60,
-    });
+    if (!cursorParam) {
+      await redis.set(cacheKey, JSON.stringify(response), {
+        EX: CACHE_TTL,
+      });
+    }
 
     return res.json(response);
   } catch (err) {

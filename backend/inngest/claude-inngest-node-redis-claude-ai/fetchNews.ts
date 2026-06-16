@@ -1,8 +1,7 @@
-// know if i can use node-redis
-
 import Parser from "rss-parser";
 import pLimit from "p-limit";
 import { z } from "zod";
+import { inArray } from "drizzle-orm"; // BUG FIX: was dynamic import inside step.run
 
 import { inngest } from "@/lib/inngest";
 import { db } from "@/db";
@@ -21,14 +20,16 @@ import type { RawArticle, ScrapedArticle, EnrichedArticle } from "@/types";
 // ── Config ─────────────────────────────────────────────────────────────────────
 
 const RSS_PARSER = new Parser({ timeout: 10_000 });
+const FEED_CONCURRENCY = 5; // BUG FIX: was pLimit(FEEDS.length) which equals
+// pLimit(12) — limit === total tasks === no limiting.
+// Fixed to a meaningful cap of 5.
 const SCRAPE_CONCURRENCY = 5; // max parallel scrape requests
-const AI_BATCH_SIZE = 5; // articles per OpenAI call
+const AI_BATCH_SIZE = 5; // articles per gpt-4o-mini call
+const SAVE_CONCURRENCY = 10; // max parallel DB writes
 const DEDUPE_TTL_SECONDS = 86_400; // 24 hours
 const MAX_ITEMS_PER_FEED = 20; // cap per feed to avoid thundering herd
 
 // ── Zod schema — validates each RSS item before processing ────────────────────
-// FIX: original had no validation — malformed RSS items caused silent crashes
-//      deep in the pipeline after wasting scraping + AI budget on them.
 
 const RssItemSchema = z.object({
   title: z.string().min(1),
@@ -40,7 +41,6 @@ const RssItemSchema = z.object({
 
 function parseRssItem(item: Parser.Item, feedUrl: string): RawArticle | null {
   const parsed = RssItemSchema.safeParse(item);
-
   if (!parsed.success) return null;
 
   const { title, link, contentSnippet, enclosure, pubDate } = parsed.data;
@@ -65,8 +65,7 @@ export const fetchNews = inngest.createFunction(
   {
     id: "fetch-news-production",
     name: "Fetch News from RSS Feeds",
-    // Prevent overlapping runs if a previous execution is still going
-    concurrency: { limit: 1 },
+    concurrency: { limit: 1 }, // prevent overlapping runs
     retries: 2,
   },
   { cron: "*/10 * * * *" },
@@ -77,15 +76,18 @@ export const fetchNews = inngest.createFunction(
 
     const rawArticles = await step.run("fetch-rss-feeds", async () => {
       const results: RawArticle[] = [];
-      const feedLimit = pLimit(FEEDS.length); // all feeds fetched in parallel
+
+      // BUG FIX: was pLimit(FEEDS.length) — a limit equal to the total number
+      // of tasks does nothing (same as Promise.all with extra overhead).
+      // Fixed to FEED_CONCURRENCY = 5 for a real meaningful cap.
+      const feedLimit = pLimit(FEED_CONCURRENCY);
 
       const feedResults = await Promise.allSettled(
         FEEDS.map((feed) =>
           feedLimit(async () => {
             const parsed = await RSS_PARSER.parseURL(feed.url);
-            const items = parsed.items.slice(0, MAX_ITEMS_PER_FEED);
-
-            return items
+            return parsed.items
+              .slice(0, MAX_ITEMS_PER_FEED)
               .map((item) => parseRssItem(item, feed.url))
               .filter((a): a is RawArticle => a !== null);
           }),
@@ -113,43 +115,52 @@ export const fetchNews = inngest.createFunction(
 
     // ── STEP 2: Deduplicate ──────────────────────────────────────────────────
     //
-    // FIX 1: Original fired one redis.set + one db.select per article
-    //        sequentially inside a for loop — O(n) round trips.
-    //        Now uses:
-    //          - One pipeline redis call for all SET NX operations
-    //          - One DB query with inArray for all DB existence checks
+    // BUG FIX — node-redis migration:
     //
-    // FIX 2: Redis-first dedup prevents hitting the DB for already-seen URLs.
-    //        DB check is a safety net for Redis evictions.
+    //   BEFORE (ioredis):
+    //     const pipeline = redis.pipeline()
+    //     pipeline.set(key, "1", "NX", "EX", TTL)   ← positional args
+    //     const results = await pipeline.exec()
+    //     const value = Array.isArray(result) ? result[1] : result  ← tuple unwrap
+    //
+    //   AFTER (node-redis):
+    //     const multi = redis.multi()
+    //     multi.set(key, "1", { NX: true, EX: TTL })  ← object options
+    //     const results = await multi.exec()
+    //     results[i] === "OK"  ← flat value array, no tuple unwrapping
+    //
+    //   node-redis multi().exec() returns a flat value[] array.
+    //   ioredis pipeline().exec() returns [error, value][] tuples.
+    //   These are incompatible — using ioredis tuple logic against node-redis
+    //   causes every result check to silently fail (value is never result[1]).
+    //
+    // BUG FIX — dynamic import:
+    //   `const { sql, inArray } = await import("drizzle-orm")` was inside step.run.
+    //   Dynamic imports inside Inngest steps are non-deterministic on replay.
+    //   `sql` was also imported but never used — dead import.
+    //   Fixed: static top-level import of inArray only (see top of file).
 
     const uniqueArticles = await step.run("deduplicate", async () => {
-      // Redis pipeline: SET NX all URLs at once
-      // Returns array of results — "OK" if set (new), null if already existed
-      const pipeline = redis.pipeline();
-      for (const article of rawArticles) {
-        pipeline.set(
-          getDedupeKey(article.url),
-          "1",
-          "NX",
-          "EX",
-          DEDUPE_TTL_SECONDS,
-        );
-      }
-      const redisResults = await pipeline.exec();
+      // node-redis v4: use multi() instead of pipeline()
+      const multi = redis.multi();
 
-      // Filter to only articles that Redis didn't know about
-      const redisNew = rawArticles.filter((_, i) => {
-        const result = redisResults?.[i];
-        // ioredis pipeline result is [error, value] tuple
-        const value = Array.isArray(result) ? result[1] : result;
-        return value === "OK";
-      });
+      for (const article of rawArticles) {
+        // node-redis v4: object options syntax — not positional strings
+        multi.set(getDedupeKey(article.url), "1", {
+          NX: true,
+          EX: DEDUPE_TTL_SECONDS,
+        });
+      }
+
+      // node-redis multi().exec() returns flat value[] — no [error, value] tuples
+      const multiResults = await multi.exec();
+
+      // SET NX returns "OK" for new keys, null if key already existed
+      const redisNew = rawArticles.filter((_, i) => multiResults[i] === "OK");
 
       if (redisNew.length === 0) return [];
 
       // Single DB query — check all remaining URLs at once
-      // FIX: original did one db.select per article inside a for loop
-      const { sql, inArray } = await import("drizzle-orm");
       const existingUrls = await db
         .select({ url: posts.url })
         .from(posts)
@@ -161,7 +172,6 @@ export const fetchNews = inngest.createFunction(
         );
 
       const existingSet = new Set(existingUrls.map((r) => r.url));
-
       const fresh = redisNew.filter((a) => !existingSet.has(a.url));
 
       logger.info(
@@ -179,15 +189,6 @@ export const fetchNews = inngest.createFunction(
     }
 
     // ── STEP 3: Scrape full content and OG images ────────────────────────────
-    //
-    // FIX 1: Original re-fetched the page to extract OG image even though
-    //        scrapeArticle already fetches the full page. Now combined into
-    //        one fetch per article.
-    //
-    // FIX 2: require("cheerio") inside async callback moved to scraper.ts
-    //        as a top-level import.
-    //
-    // FIX 3: pLimit already imported — applied here correctly.
 
     const scrapedArticles = await step.run("scrape-content", async () => {
       const scrapeLimit = pLimit(SCRAPE_CONCURRENCY);
@@ -199,7 +200,7 @@ export const fetchNews = inngest.createFunction(
 
             return {
               ...article,
-              // Use scraped content, fall back to RSS description, fall back to title
+              // Use scraped content, fall back to RSS description, then title
               content: scraped.content ?? article.description ?? article.title,
               // Use scraped OG image, fall back to RSS enclosure image
               imageUrl: scraped.imageUrl ?? article.imageUrl,
@@ -212,32 +213,23 @@ export const fetchNews = inngest.createFunction(
       return results;
     });
 
-    // ── STEP 4: AI summarization ─────────────────────────────────────────────
-    //
-    // FIX 1: Original sent batches but awaited them sequentially inside a for
-    //        loop. Now all batches run concurrently via Promise.all.
-    //
-    // FIX 2: Prompt now specifies exact JSON schema — no more hallucinated
-    //        response shapes that cause safeParse to silently fail.
-    //
-    // FIX 3: Added retry with exponential backoff inside batchSummarize.
+    // ── STEP 4: AI summarization (gpt-4o-mini) ───────────────────────────────
 
     const enrichedArticles = await step.run("ai-summarize", async () => {
       const contents = scrapedArticles.map((a) => a.content);
 
-      // Split into batches
+      // Split into batches of AI_BATCH_SIZE
       const batches: string[][] = [];
       for (let i = 0; i < contents.length; i += AI_BATCH_SIZE) {
         batches.push(contents.slice(i, i + AI_BATCH_SIZE));
       }
 
-      // FIX: run all batches concurrently instead of sequentially
-      const batchLimit = pLimit(3); // max 3 concurrent OpenAI calls
+      // Run batches concurrently — max 3 parallel gpt-4o-mini calls
+      const batchLimit = pLimit(3);
       const batchResults = await Promise.all(
         batches.map((batch) => batchLimit(() => batchSummarize(batch))),
       );
 
-      // Flatten batch results back into flat array
       const summaries = batchResults.flat();
 
       const enriched: EnrichedArticle[] = scrapedArticles.map((article, i) => ({
@@ -250,22 +242,9 @@ export const fetchNews = inngest.createFunction(
     });
 
     // ── STEP 5: Persist to database ──────────────────────────────────────────
-    //
-    // FIX 1: Original used a sequential for loop with await inside —
-    //        O(n) sequential DB operations. Now runs concurrently with pLimit.
-    //
-    // FIX 2: No onConflictDoNothing on posts.insert — a race condition between
-    //        two concurrent Inngest executions could cause a duplicate key error
-    //        that kills the entire save step. Now uses onConflictDoNothing.
-    //
-    // FIX 3: Slug uniqueness check and category detection ran serially inside
-    //        the loop. Now run concurrently per article via Promise.allSettled.
-    //
-    // FIX 4: Promise.allSettled instead of Promise.all — one failed insert
-    //        no longer aborts all remaining inserts.
 
     const saveResults = await step.run("save-to-database", async () => {
-      const saveLimit = pLimit(10); // max 10 concurrent DB writes
+      const saveLimit = pLimit(SAVE_CONCURRENCY);
 
       const results = await Promise.allSettled(
         enrichedArticles.map((article) =>
@@ -284,7 +263,7 @@ export const fetchNews = inngest.createFunction(
               publishedAt: article.publishedAt,
             });
 
-            // FIX: onConflictDoNothing prevents duplicate key crash on race condition
+            // onConflictDoNothing prevents duplicate key crash on race condition
             await db
               .insert(posts)
               .values({
@@ -308,7 +287,6 @@ export const fetchNews = inngest.createFunction(
       const succeeded = results.filter((r) => r.status === "fulfilled").length;
       const failed = results.filter((r) => r.status === "rejected");
 
-      // Log individual failures without crashing the step
       for (const failure of failed) {
         if (failure.status === "rejected") {
           logger.error("Article insert failed:", failure.reason);
