@@ -24,16 +24,35 @@ router.delete("/api/bookmark", async (req, res) => {
     // 2. TRANSACTION
     // =========================
     await db.transaction(async (tx) => {
+      // 1. Delete bookmark (idempotent)
       const result = await tx.execute(sql`
         DELETE FROM bookmarks
         WHERE user_id = ${userId}
-        AND post_id = ${postId}
+          AND post_id = ${postId}
         RETURNING 1
       `);
 
       wasDeleted = result.rows.length > 0;
 
       if (!wasDeleted) return;
+
+      // 2. Decrease post score (-8, CLAMPED)
+      await tx.execute(sql`
+        UPDATE posts
+        SET score = GREATEST(score - 8, 0)
+        WHERE id = ${postId}
+      `);
+
+      // 3. Decrease user behavior (-8, CLAMPED + GUARDED)
+      await tx.execute(sql`
+        UPDATE user_behavior ub
+        SET score = GREATEST(ub.score - 8, 0)
+        FROM posts p
+        WHERE p.id = ${postId}
+          AND p.category_id IS NOT NULL
+          AND ub.user_id = ${userId}
+          AND ub.category_id = p.category_id
+      `);
     });
 
     // =========================
@@ -45,10 +64,10 @@ router.delete("/api/bookmark", async (req, res) => {
       // 🔥 Invalidate user's bookmarks feed
       pipeline.incr(`bookmarks:${userId}:version`);
 
-      // 🔥 Invalidate post cache (bookmark state embedded)
+      // 🔥 Invalidate post cache
       pipeline.incr(`post:${slug}:version`);
 
-      // 🔥 Invalidate user's main feed
+      // 🔥 Invalidate personalized feed
       pipeline.incr(`feed:${userId}:version`);
 
       await pipeline.exec();

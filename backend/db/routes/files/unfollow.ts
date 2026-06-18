@@ -24,10 +24,11 @@ router.post("/api/unfollow-category", async (req, res) => {
     // 2. TRANSACTION
     // =========================
     await db.transaction(async (tx) => {
+      // 1. Delete follow (idempotent)
       const result = await tx.execute(sql`
         DELETE FROM follows
         WHERE user_id = ${userId}
-        AND category_id = ${categoryId}
+          AND category_id = ${categoryId}
         RETURNING 1
       `);
 
@@ -35,13 +36,12 @@ router.post("/api/unfollow-category", async (req, res) => {
 
       if (!wasUnfollowed) return;
 
-      // 🔥 Optional: reduce user behavior (keeps personalization accurate)
+      // 2. Decrease user behavior ONLY if exists (correct behavior)
       await tx.execute(sql`
-        INSERT INTO user_behavior (user_id, category_id, score)
-        VALUES (${userId}, ${categoryId}, -10)
-        ON CONFLICT (user_id, category_id)
-        DO UPDATE SET 
-          score = user_behavior.score - 10
+        UPDATE user_behavior
+        SET score = GREATEST(score - 10, 1)
+        WHERE user_id = ${userId}
+          AND category_id = ${categoryId}
       `);
     });
 

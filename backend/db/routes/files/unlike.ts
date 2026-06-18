@@ -24,9 +24,11 @@ router.post("/api/unlike", async (req, res) => {
     // 2. TRANSACTION
     // =========================
     await db.transaction(async (tx) => {
+      // 1. Delete like (idempotent)
       const deleteResult = await tx.execute(sql`
         DELETE FROM likes
-        WHERE user_id = ${userId} AND post_id = ${postId}
+        WHERE user_id = ${userId}
+          AND post_id = ${postId}
         RETURNING 1
       `);
 
@@ -34,22 +36,21 @@ router.post("/api/unlike", async (req, res) => {
 
       if (!isRemoved) return;
 
-      // Update post safely
+      // 2. Update post safely (never below 0)
       await tx.execute(sql`
         UPDATE posts
         SET 
           likes_count = GREATEST(likes_count - 1, 0),
-          score = score - 5
+          score = GREATEST(score - 5, 0)
         WHERE id = ${postId}
       `);
 
-      // Update user behavior
+      // 3. ✅ FIXED: Only update existing behavior (no insert)
       await tx.execute(sql`
-        INSERT INTO user_behavior (user_id, category_id, score)
-        VALUES (${userId}, ${categoryId}, -5)
-        ON CONFLICT (user_id, category_id)
-        DO UPDATE SET 
-          score = user_behavior.score - 5
+        UPDATE user_behavior
+        SET score = GREATEST(score - 5, 1)
+        WHERE user_id = ${userId}
+          AND category_id = ${categoryId}
       `);
     });
 
@@ -69,7 +70,7 @@ router.post("/api/unlike", async (req, res) => {
 
       await pipeline.exec();
 
-      // Optional safety: prevent negative values (rare edge case)
+      // Safety guard (rare edge case)
       const likes = await redis.get(`post:${postId}:likes`);
       if (likes && parseInt(likes, 10) < 0) {
         await redis.set(`post:${postId}:likes`, 0);
