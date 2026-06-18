@@ -130,10 +130,11 @@ export const likes = pgTable(
       .references(() => posts.id, { onDelete: "cascade" }),
   },
   (t) => ({
+    // ✅ Composite Primary Key (auto-indexed)
     pk: primaryKey({ columns: [t.userId, t.postId] }),
 
+    // ✅ Needed for post-based queries (counts, joins, trending)
     idxLikesPostId: index("idx_likes_post_id").on(t.postId),
-    idxLikesUserPost: index("idx_likes_user_post").on(t.userId, t.postId),
   }),
 );
 
@@ -152,12 +153,8 @@ export const bookmarks = pgTable(
       .references(() => posts.id, { onDelete: "cascade" }),
   },
   (t) => ({
+    // ✅ Composite Primary Key (ALREADY indexed)
     pk: primaryKey({ columns: [t.userId, t.postId] }),
-
-    idxBookmarksUserPost: index("idx_bookmarks_user_post").on(
-      t.userId,
-      t.postId,
-    ),
   }),
 );
 

@@ -1,7 +1,7 @@
 import Parser from "rss-parser";
 import pLimit from "p-limit";
 import { z } from "zod";
-import { inArray } from "drizzle-orm"; // BUG FIX: was dynamic import inside step.run
+import { inArray } from "drizzle-orm";
 
 import { inngest } from "@/lib/inngest";
 import { db } from "@/db";
@@ -20,16 +20,14 @@ import type { RawArticle, ScrapedArticle, EnrichedArticle } from "@/types";
 // ── Config ─────────────────────────────────────────────────────────────────────
 
 const RSS_PARSER = new Parser({ timeout: 10_000 });
-const FEED_CONCURRENCY = 5; // BUG FIX: was pLimit(FEEDS.length) which equals
-// pLimit(12) — limit === total tasks === no limiting.
-// Fixed to a meaningful cap of 5.
-const SCRAPE_CONCURRENCY = 5; // max parallel scrape requests
-const AI_BATCH_SIZE = 5; // articles per gpt-4o-mini call
-const SAVE_CONCURRENCY = 10; // max parallel DB writes
-const DEDUPE_TTL_SECONDS = 86_400; // 24 hours
-const MAX_ITEMS_PER_FEED = 20; // cap per feed to avoid thundering herd
+const FEED_CONCURRENCY = 5;
+const SCRAPE_CONCURRENCY = 5;
+const AI_BATCH_SIZE = 5;
+const SAVE_CONCURRENCY = 10;
+const DEDUPE_TTL_SECONDS = 86_400;
+const MAX_ITEMS_PER_FEED = 20;
 
-// ── Zod schema — validates each RSS item before processing ────────────────────
+// ── Zod schema ────────────────────────────────────────────────────────────────
 
 const RssItemSchema = z.object({
   title: z.string().min(1),
@@ -65,21 +63,16 @@ export const fetchNews = inngest.createFunction(
   {
     id: "fetch-news-production",
     name: "Fetch News from RSS Feeds",
-    concurrency: { limit: 1 }, // prevent overlapping runs
+    concurrency: { limit: 1 },
     retries: 2,
   },
   { cron: "*/10 * * * *" },
 
   async ({ step, logger }) => {
     // ── STEP 1: Fetch all RSS feeds ──────────────────────────────────────────
-    // Each feed is fetched independently so one failure doesn't abort others.
 
     const rawArticles = await step.run("fetch-rss-feeds", async () => {
       const results: RawArticle[] = [];
-
-      // BUG FIX: was pLimit(FEEDS.length) — a limit equal to the total number
-      // of tasks does nothing (same as Promise.all with extra overhead).
-      // Fixed to FEED_CONCURRENCY = 5 for a real meaningful cap.
       const feedLimit = pLimit(FEED_CONCURRENCY);
 
       const feedResults = await Promise.allSettled(
@@ -114,53 +107,22 @@ export const fetchNews = inngest.createFunction(
     }
 
     // ── STEP 2: Deduplicate ──────────────────────────────────────────────────
-    //
-    // BUG FIX — node-redis migration:
-    //
-    //   BEFORE (ioredis):
-    //     const pipeline = redis.pipeline()
-    //     pipeline.set(key, "1", "NX", "EX", TTL)   ← positional args
-    //     const results = await pipeline.exec()
-    //     const value = Array.isArray(result) ? result[1] : result  ← tuple unwrap
-    //
-    //   AFTER (node-redis):
-    //     const multi = redis.multi()
-    //     multi.set(key, "1", { NX: true, EX: TTL })  ← object options
-    //     const results = await multi.exec()
-    //     results[i] === "OK"  ← flat value array, no tuple unwrapping
-    //
-    //   node-redis multi().exec() returns a flat value[] array.
-    //   ioredis pipeline().exec() returns [error, value][] tuples.
-    //   These are incompatible — using ioredis tuple logic against node-redis
-    //   causes every result check to silently fail (value is never result[1]).
-    //
-    // BUG FIX — dynamic import:
-    //   `const { sql, inArray } = await import("drizzle-orm")` was inside step.run.
-    //   Dynamic imports inside Inngest steps are non-deterministic on replay.
-    //   `sql` was also imported but never used — dead import.
-    //   Fixed: static top-level import of inArray only (see top of file).
 
     const uniqueArticles = await step.run("deduplicate", async () => {
-      // node-redis v4: use multi() instead of pipeline()
       const multi = redis.multi();
 
       for (const article of rawArticles) {
-        // node-redis v4: object options syntax — not positional strings
         multi.set(getDedupeKey(article.url), "1", {
           NX: true,
           EX: DEDUPE_TTL_SECONDS,
         });
       }
 
-      // node-redis multi().exec() returns flat value[] — no [error, value] tuples
       const multiResults = await multi.exec();
-
-      // SET NX returns "OK" for new keys, null if key already existed
       const redisNew = rawArticles.filter((_, i) => multiResults[i] === "OK");
 
       if (redisNew.length === 0) return [];
 
-      // Single DB query — check all remaining URLs at once
       const existingUrls = await db
         .select({ url: posts.url })
         .from(posts)
@@ -188,7 +150,7 @@ export const fetchNews = inngest.createFunction(
       return { processed: 0 };
     }
 
-    // ── STEP 3: Scrape full content and OG images ────────────────────────────
+    // ── STEP 3: Scrape content ───────────────────────────────────────────────
 
     const scrapedArticles = await step.run("scrape-content", async () => {
       const scrapeLimit = pLimit(SCRAPE_CONCURRENCY);
@@ -200,9 +162,7 @@ export const fetchNews = inngest.createFunction(
 
             return {
               ...article,
-              // Use scraped content, fall back to RSS description, then title
               content: scraped.content ?? article.description ?? article.title,
-              // Use scraped OG image, fall back to RSS enclosure image
               imageUrl: scraped.imageUrl ?? article.imageUrl,
             };
           }),
@@ -213,18 +173,16 @@ export const fetchNews = inngest.createFunction(
       return results;
     });
 
-    // ── STEP 4: AI summarization (gpt-4o-mini) ───────────────────────────────
+    // ── STEP 4: AI summarization ─────────────────────────────────────────────
 
     const enrichedArticles = await step.run("ai-summarize", async () => {
       const contents = scrapedArticles.map((a) => a.content);
 
-      // Split into batches of AI_BATCH_SIZE
       const batches: string[][] = [];
       for (let i = 0; i < contents.length; i += AI_BATCH_SIZE) {
         batches.push(contents.slice(i, i + AI_BATCH_SIZE));
       }
 
-      // Run batches concurrently — max 3 parallel gpt-4o-mini calls
       const batchLimit = pLimit(3);
       const batchResults = await Promise.all(
         batches.map((batch) => batchLimit(() => batchSummarize(batch))),
@@ -232,16 +190,13 @@ export const fetchNews = inngest.createFunction(
 
       const summaries = batchResults.flat();
 
-      const enriched: EnrichedArticle[] = scrapedArticles.map((article, i) => ({
+      return scrapedArticles.map((article, i) => ({
         ...article,
         summary: summaries[i]?.summary ?? article.content.slice(0, 200),
       }));
-
-      logger.info(`Summarized ${enriched.length} articles`);
-      return enriched;
     });
 
-    // ── STEP 5: Persist to database ──────────────────────────────────────────
+    // ── STEP 5: Save to DB ───────────────────────────────────────────────────
 
     const saveResults = await step.run("save-to-database", async () => {
       const saveLimit = pLimit(SAVE_CONCURRENCY);
@@ -249,7 +204,6 @@ export const fetchNews = inngest.createFunction(
       const results = await Promise.allSettled(
         enrichedArticles.map((article) =>
           saveLimit(async () => {
-            // Run slug + source + category lookups concurrently per article
             const [slug, source, categoryId] = await Promise.all([
               ensureUniqueSlug(generateSlug(article.title)),
               getOrCreateSource(article.feedUrl),
@@ -263,7 +217,6 @@ export const fetchNews = inngest.createFunction(
               publishedAt: article.publishedAt,
             });
 
-            // onConflictDoNothing prevents duplicate key crash on race condition
             await db
               .insert(posts)
               .values({
@@ -296,9 +249,34 @@ export const fetchNews = inngest.createFunction(
       return { succeeded, failed: failed.length };
     });
 
+    // ── STEP 6: ✅ VERSIONED CACHE INVALIDATION (O(1)) ───────────────────────
+
+    if (saveResults.succeeded > 0) {
+      await step.run("bump-cache-versions", async () => {
+        try {
+          const multi = redis.multi();
+
+          // 🔥 GLOBAL FEED INVALIDATION (all users)
+          multi.incr("feed:global:version");
+
+          // 🔥 TRENDING INVALIDATION
+          multi.incr("feed:trending:version");
+
+          await multi.exec();
+
+          logger.info("[cache] Feed + trending versions bumped");
+        } catch (err) {
+          logger.warn(
+            `[cache] Version bump failed (non-fatal): ${(err as Error).message}`,
+          );
+        }
+      });
+    } else {
+      logger.info("[cache] No new posts saved — skipping invalidation");
+    }
+
     logger.info(
-      `✅ Pipeline complete: ${saveResults.succeeded} saved, ` +
-        `${saveResults.failed} failed`,
+      `✅ Pipeline complete: ${saveResults.succeeded} saved, ${saveResults.failed} failed`,
     );
 
     return {

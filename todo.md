@@ -8,13 +8,13 @@
 4. Get the personalized feed "for you" route ready ✅
 5. Get the single post route ready ✅
 6. Get the following route ready ✅
-7. Get the trending route ready
+7. Get the trending route ready ✅
 8. Get the explore route ready
 9. Get the Bookmark (view) ready
-10. Get the videos route ready
+10. Get the videos route ready // I WILL NOT BE ROLLING THIS OUT AS I LUNCH.
 11. Get the complete like route ready - featuring: like, post.score, user_behaviour.score
 12. Get the complete post click (view) route ready - featuring: post.score, user_behaviour.score
-13. Get the complete long read tracking route ready - featuring: post.score, user_behaviour.score
+13. Get the complete long read tracking route ready - featuring: post.score, user_behaviour.score // NO NEED FOR THIS ROUTE.
 14. Get the complete Bookmark route (to save a post) ready - featuring: post.score, user_behaviour.score
 15. Get the complete Comment route ready -featuring: post.score, user_behaviour.score
 16. Get the complete sharing route ready - featuring: post.score, user_behaviour.score
@@ -69,3 +69,43 @@
     .then(res => res.json())
     .then(setComments);
 }, [postId]); -->
+
+// IMPORTAND WARNING
+// ⚠️ FINAL ARCHITECTURE NOTE (IMPORTANT)
+// Right now you are doing:
+// DB = source of truth ✅
+// Redis = real-time counter ⚠️
+// Feed cache = derived data ⚠️
+// This means:
+// 👉 Feed MUST always be invalidated on:
+// like
+// comment
+// follow
+// post creation
+// Otherwise ranking becomes incorrect.
+
+// THE MENU ITEMS:
+// FOR YOU ✅
+// TRENDING ✅
+// EXPLORE
+// HEADLINES ✅
+// BOOKMARK ✅
+
+✅ Invalidate feed cache on new bookmark / post / like
+✅ Merge Redis + DB counts (real-time feeds)
+✅ versioned cache invalidation
+
+// TOMORROW
+// NOTE USE REDIS PIPELINE multi() in node-redis FORE LIKE/UNLIKE, BOOKMARK/UNBOOKMARK, FOLLOW/UNFOLLOW
+
+1. CHECK IF SINGLE POST CORRECTLY WORK WITH THE CACHE FUNCTION IN CACHE.TS ✅
+2. ASK IF SCRAPER.TS SUPPORT VERSIONED CACHE INVALIDAION AND IF IT WORKS WITH MY CACHE FUNCTION IN CACHE.TS ✅
+3. UPDATE LIKE.TS TO WORK WITH MY NEW CACHE.TS CACHE. ✅
+4. LET CHATGPT REVIEW ALL CODES.
+5. BOOKMARK ROUTE TO HANDLE BOOKMARK AND UNBOOKMARK POST - IT SHOULD WORK WITH CACHE.TS
+6. BUILD COMMENT ROUTES
+7. MAKE SURE CACHE IS INVALIDATED WHEN A USER CREATE, UPDATE OR DELETE A COMMENT
+8. BUILD EXPLORE ROUTE - HANDLE FOLLOW AND UNFOLLOW CATEGORY, MAKE SURE CACHE IS INVALIDATED PROPERLY
+9. PUT EVERYTHING TOGETHER IN A DEMO CALLED EAGLESTELEGRAM USING NEON AND RENDER
+10. FIX ALL BUGS.
+11. REDEPLOY TO RAILWAY --- BACKEND DONE ✅
