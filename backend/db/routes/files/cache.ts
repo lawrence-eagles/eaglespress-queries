@@ -127,3 +127,14 @@ export async function buildFollowingKey(
     ? `feed:following:${userId}:v${version}:cursor:${cursor}`
     : `feed:following:${userId}:v${version}:start`;
 }
+
+// =========================
+// CACHE KEY
+// =========================
+export async function buildCommentsKey(postId: string, cursor: string | null) {
+  const version = (await redis.get(`comments:${postId}:version`)) ?? "1";
+
+  return cursor
+    ? `comments:${postId}:v${version}:c:${cursor}`
+    : `comments:${postId}:v${version}:start`;
+}
