@@ -6,14 +6,14 @@ import { redis } from "@/lib/redis";
 const router = Router();
 
 router.post("/api/like", async (req, res) => {
-  const { userId, postId, categoryId, slug } = req.body;
+  const { userId, postId, slug } = req.body;
 
   // =========================
   // 1. VALIDATION
   // =========================
-  if (!userId || !postId || !categoryId || !slug) {
+  if (!userId || !postId || !slug) {
     return res.status(400).json({
-      error: "Missing userId, postId, categoryId, or slug",
+      error: "Missing userId, postId, or slug",
     });
   }
 
@@ -24,6 +24,7 @@ router.post("/api/like", async (req, res) => {
     // 2. TRANSACTION
     // =========================
     await db.transaction(async (tx) => {
+      // 1. Insert like (idempotent)
       const likeResult = await tx.execute(sql`
         INSERT INTO likes (user_id, post_id)
         VALUES (${userId}, ${postId})
@@ -35,7 +36,31 @@ router.post("/api/like", async (req, res) => {
 
       if (!isNewLike) return;
 
-      // Update post counters
+      // 2. Get category safely from DB
+      const categoryResult = await tx.execute(sql`
+        SELECT category_id
+        FROM posts
+        WHERE id = ${postId}
+        LIMIT 1
+      `);
+
+      const categoryId = categoryResult.rows[0]?.category_id;
+
+      // If post has no category, skip behavior update
+      if (!categoryId) {
+        // still update post counters
+        await tx.execute(sql`
+          UPDATE posts
+          SET 
+            likes_count = likes_count + 1,
+            score = score + 5
+          WHERE id = ${postId}
+        `);
+
+        return;
+      }
+
+      // 3. Update post counters
       await tx.execute(sql`
         UPDATE posts
         SET 
@@ -44,7 +69,7 @@ router.post("/api/like", async (req, res) => {
         WHERE id = ${postId}
       `);
 
-      // Update user behavior
+      // 4. ✅ Correct behavior update (already correct logic)
       await tx.execute(sql`
         INSERT INTO user_behavior (user_id, category_id, score)
         VALUES (${userId}, ${categoryId}, 5)

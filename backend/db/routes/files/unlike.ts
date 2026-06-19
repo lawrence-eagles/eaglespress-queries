@@ -6,14 +6,14 @@ import { redis } from "@/lib/redis";
 const router = Router();
 
 router.post("/api/unlike", async (req, res) => {
-  const { userId, postId, categoryId, slug } = req.body;
+  const { userId, postId, slug } = req.body;
 
   // =========================
   // 1. VALIDATION
   // =========================
-  if (!userId || !postId || !categoryId || !slug) {
+  if (!userId || !postId || !slug) {
     return res.status(400).json({
-      error: "Missing userId, postId, categoryId, or slug",
+      error: "Missing userId, postId, or slug",
     });
   }
 
@@ -36,7 +36,17 @@ router.post("/api/unlike", async (req, res) => {
 
       if (!isRemoved) return;
 
-      // 2. Update post safely (never below 0)
+      // 2. Get category from DB (🔥 FIX: no client trust)
+      const postResult = await tx.execute(sql`
+        SELECT category_id
+        FROM posts
+        WHERE id = ${postId}
+        LIMIT 1
+      `);
+
+      const categoryId = postResult.rows[0]?.category_id;
+
+      // 3. Update post safely
       await tx.execute(sql`
         UPDATE posts
         SET 
@@ -45,13 +55,15 @@ router.post("/api/unlike", async (req, res) => {
         WHERE id = ${postId}
       `);
 
-      // 3. ✅ FIXED: Only update existing behavior (no insert)
-      await tx.execute(sql`
-        UPDATE user_behavior
-        SET score = GREATEST(score - 5, 1)
-        WHERE user_id = ${userId}
-          AND category_id = ${categoryId}
-      `);
+      // 4. Update user behavior ONLY if category exists
+      if (categoryId) {
+        await tx.execute(sql`
+          UPDATE user_behavior
+          SET score = GREATEST(score - 5, 1)
+          WHERE user_id = ${userId}
+            AND category_id = ${categoryId}
+        `);
+      }
     });
 
     // =========================

@@ -24,37 +24,49 @@ router.post("/api/unfollow-category", async (req, res) => {
     // 2. TRANSACTION
     // =========================
     await db.transaction(async (tx) => {
-      // 1. Delete follow (idempotent)
-      const result = await tx.execute(sql`
+      // ✅ 1. VERIFY CATEGORY EXISTS
+      const categoryResult = await tx.execute(sql`
+        SELECT id 
+        FROM categories 
+        WHERE id = ${categoryId}
+        LIMIT 1
+      `);
+
+      if (categoryResult.rows.length === 0) {
+        throw new Error("Invalid categoryId");
+      }
+
+      // ✅ SAFE SOURCE OF TRUTH
+      const validCategoryId = categoryResult.rows[0].id;
+
+      // ✅ 2. DELETE FOLLOW (USE VALID ID)
+      const deleteResult = await tx.execute(sql`
         DELETE FROM follows
         WHERE user_id = ${userId}
-          AND category_id = ${categoryId}
+          AND category_id = ${validCategoryId}
         RETURNING 1
       `);
 
-      wasUnfollowed = result.rows.length > 0;
+      wasUnfollowed = deleteResult.rows.length > 0;
 
       if (!wasUnfollowed) return;
 
-      // 2. Decrease user behavior ONLY if exists (correct behavior)
+      // ✅ 3. UPDATE USER BEHAVIOR (USE VALID ID)
       await tx.execute(sql`
         UPDATE user_behavior
         SET score = GREATEST(score - 10, 1)
         WHERE user_id = ${userId}
-          AND category_id = ${categoryId}
+          AND category_id = ${validCategoryId}
       `);
     });
 
     // =========================
-    // 3. REDIS INVALIDATION (PIPELINED)
+    // 3. REDIS INVALIDATION
     // =========================
     if (wasUnfollowed) {
       const pipeline = redis.multi();
 
-      // 🔥 Invalidate following feed
       pipeline.incr(`following:${userId}:version`);
-
-      // 🔥 Invalidate personalized main feed
       pipeline.incr(`feed:${userId}:version`);
 
       await pipeline.exec();
@@ -66,7 +78,14 @@ router.post("/api/unfollow-category", async (req, res) => {
     });
   } catch (err) {
     console.error("UNFOLLOW CATEGORY ERROR:", err);
-    return res.status(500).json({ error: "Unfollow category failed" });
+
+    if ((err as Error).message === "Invalid categoryId") {
+      return res.status(400).json({ error: "Invalid categoryId" });
+    }
+
+    return res.status(500).json({
+      error: "Unfollow category failed",
+    });
   }
 });
 
