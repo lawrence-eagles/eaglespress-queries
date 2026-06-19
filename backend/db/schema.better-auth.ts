@@ -50,7 +50,10 @@ export const posts = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
 
     title: text("title").notNull(),
-    slug: text("slug").notNull(),
+
+    // 🔥 UNIQUE + INDEXED LOOKUP (slug-based routing)
+    slug: text("slug").notNull().unique(),
+
     description: text("description"),
     url: text("url").notNull(),
     imageUrl: text("image_url"),
@@ -58,26 +61,41 @@ export const posts = pgTable(
     sourceId: uuid("source_id").references(() => sources.id),
     categoryId: uuid("category_id").references(() => categories.id),
 
+    // 🔥 CORE RANKING SIGNAL
     score: integer("score").default(0),
 
-    // 🔥 MATERIALIZED COUNTERS
-    likesCount: integer("likes_count").default(0),
-    commentsCount: integer("comments_count").default(0),
+    // 🔥 CLICK TRACKING
+    clicks: integer("clicks").default(0).notNull(),
 
-    createdAt: timestamp("created_at").defaultNow(),
+    // 🔥 MATERIALIZED COUNTERS
+    likesCount: integer("likes_count").default(0).notNull(),
+    commentsCount: integer("comments_count").default(0).notNull(),
+
+    createdAt: timestamp("created_at").defaultNow().notNull(),
   },
   (t) => ({
+    // 🔥 SLUG LOOKUP INDEX (critical for GET /:slug)
+    idxPostsSlug: index("idx_posts_slug").on(t.slug),
+
+    // 🔥 FEED / RANKING INDEX
     idxPostsTrending: index("idx_posts_trending").on(
       t.score,
       t.createdAt,
       t.id,
     ),
 
+    // 🔥 PAGINATION INDEX (cursor-based)
     idxPostsCreatedAtId: index("idx_posts_created_at_id").on(t.createdAt, t.id),
 
+    // 🔥 FILTERING
     idxPostsCategoryId: index("idx_posts_category_id").on(t.categoryId),
     idxPostsSourceId: index("idx_posts_source_id").on(t.sourceId),
+
+    // 🔥 SORTING
     idxPostsScore: index("idx_posts_score").on(t.score),
+
+    // 🔥 ANALYTICS / TRENDING BY ENGAGEMENT
+    idxPostsClicks: index("idx_posts_clicks").on(t.clicks),
   }),
 );
 

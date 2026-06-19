@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
 import { redis } from "@/lib/redis";
-import { buildPostCacheKey } from "@/utils/cache"; // BUG FIX: was missing, caused startup crash
+import { buildPostCacheKey } from "@/utils/cache";
 
 const router = Router();
 
@@ -32,12 +32,6 @@ interface FlagsRow {
 }
 
 // ── Track click ───────────────────────────────────────────────────────────────
-//
-// BUG FIX: original fired two separate DB calls sequentially — UPDATE posts
-// then INSERT INTO user_behavior. If the UPDATE succeeded but the INSERT
-// failed, the post score was incremented but user behavior was never recorded,
-// creating a silent inconsistency.
-// Fix: wrap both in a transaction so they succeed or fail atomically.
 
 async function trackClick(
   postId: string,
@@ -64,12 +58,10 @@ async function trackClick(
       }
     });
   } catch (err) {
-    // Tracking failures must never surface to the user
     console.error("[trackClick] Failed:", err);
   }
 }
 
-// Fire-and-forget — does not block the response
 function trackClickAsync(
   postId: string,
   userId: string | null,
@@ -91,16 +83,12 @@ router.get("/:slug", async (req, res) => {
   const cacheKey = await buildPostCacheKey(slug);
 
   try {
-    // ── 1. Cache ──────────────────────────────────────────────────────────────
-
     const cached = await redis.get(cacheKey);
     let basePost: ReturnType<typeof mapPost> | null = null;
 
     if (cached) {
       basePost = JSON.parse(cached);
     } else {
-      // ── 2. Fetch post ───────────────────────────────────────────────────────
-
       const result = await db.execute(sql`
         SELECT
           p.id,
@@ -117,12 +105,9 @@ router.get("/:slug", async (req, res) => {
           c.name AS category_name,
           s.name AS source_name,
           s.url  AS source_website
-
         FROM posts p
-
         LEFT JOIN categories c ON p.category_id = c.id
         LEFT JOIN sources     s ON p.source_id   = s.id
-
         WHERE p.slug = ${slug}
         LIMIT 1
       `);
@@ -134,14 +119,12 @@ router.get("/:slug", async (req, res) => {
       const p = result.rows[0] as PostRow;
       basePost = mapPost(p);
 
-      // Only cache posts with meaningful traffic (> 10 clicks)
-      // to avoid flooding Redis with cold cache entries
       if ((p.clicks ?? 0) > 10) {
         await redis.set(cacheKey, JSON.stringify(basePost), { EX: 300 });
       }
     }
 
-    // ── 3. User flags (always fresh — never cached) ───────────────────────────
+    // ── User flags ────────────────────────────────────────────────────────────
 
     let isLiked = false;
     let isBookmarked = false;
@@ -155,13 +138,11 @@ router.get("/:slug", async (req, res) => {
             WHERE l.post_id = ${basePost.id}
               AND l.user_id = ${userId}
           ) AS liked,
-
           EXISTS (
             SELECT 1 FROM bookmarks b
             WHERE b.post_id = ${basePost.id}
               AND b.user_id = ${userId}
           ) AS bookmarked,
-
           EXISTS (
             SELECT 1 FROM follows f
             WHERE f.category_id = ${basePost.categoryId}
@@ -171,19 +152,18 @@ router.get("/:slug", async (req, res) => {
 
       const f = flags.rows[0] as FlagsRow;
 
-      // pg driver returns EXISTS as boolean OR "t"/"f" string — cast both
       isLiked = f?.liked === true || f?.liked === "t";
       isBookmarked = f?.bookmarked === true || f?.bookmarked === "t";
       isFollowingCategory = f?.following === true || f?.following === "t";
     }
 
-    // ── 4. Track click (non-blocking) ─────────────────────────────────────────
+    // ── Track click ───────────────────────────────────────────────────────────
 
     if (basePost) {
       trackClickAsync(basePost.id, userId, basePost.categoryId);
     }
 
-    // ── 5. Response ───────────────────────────────────────────────────────────
+    // ── Response ──────────────────────────────────────────────────────────────
 
     return res.json({
       ...basePost,
@@ -213,6 +193,9 @@ function mapPost(p: PostRow) {
 
     sourceName: p.source_name,
     sourceWebsite: p.source_website,
+
+    // ✅ FIX: include clicks
+    clicks: Number(p.clicks) || 0,
 
     likesCount: Number(p.likes_count) || 0,
     commentsCount: Number(p.comments_count) || 0,
