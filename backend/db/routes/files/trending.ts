@@ -54,14 +54,16 @@ interface TrendingRow {
 
 router.get("/", async (req, res) => {
   try {
-    // BUG FIX: userId was required — returning 400 for unauthenticated users.
-    // Trending is a global feed that should be accessible without auth.
-    // userId is only needed for the user_liked / user_bookmarked EXISTS checks.
-    // When absent, those fields default to false.
+    // userId is optional — trending is a global feed accessible without auth.
+    // EXISTS subqueries with NULL safely return false for guests.
     const userId      = (req.query.userId as string) || null;
     const cursorParam = (req.query.cursor as string) || null;
 
-    const cacheKey = buildTrendingKey(cursorParam);
+    // BUG FIX: buildTrendingKey is async (calls redis.get for versioning)
+    // but was called WITHOUT await, making cacheKey a Promise<string>.
+    // Every redis.get(cacheKey) and redis.set(cacheKey, ...) was silently
+    // using "[object Promise]" as the key — cache never hit, never wrote.
+    const cacheKey = await buildTrendingKey(cursorParam);
 
     // ── 1. Cache (first page only) ────────────────────────────────────────────
 
@@ -85,9 +87,6 @@ router.get("/", async (req, res) => {
     }
 
     // ── 3. Query ──────────────────────────────────────────────────────────────
-    //
-    // When userId is null, the EXISTS subqueries use NULL which always returns
-    // false — so isLiked and isBookmarked correctly default to false for guests.
 
     const query = sql`
       WITH scored_posts AS (

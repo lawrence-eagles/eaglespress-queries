@@ -53,7 +53,6 @@
 10. isBookmarked to know if the current user already bookmark the post
 11. isFollow to know if the current user follow the category
 12. Total number of users following that category
-<!-- 13. Return all comments for that post including their replies -->
 13. Total number of comments that post have
 14. update post.count by 2
 15. update user_behaviour.count by 2
@@ -107,6 +106,7 @@
 7. MAKE SURE CACHE IS INVALIDATED WHEN A USER CREATE, UPDATE OR DELETE A COMMENT ✅
 8. BUILD EXPLORE ROUTE - HANDLE FOLLOW AND UNFOLLOW CATEGORY, MAKE SURE CACHE IS INVALIDATED PROPERLY ✅
 9. IMPLEMENT THE SHARE ROUTE AND THE POST SCORE AND BEHAVIOR UPDATES. ✅
-10. PUT EVERYTHING TOGETHER IN A DEMO CALLED EAGLESTELEGRAM USING NEON AND RENDER
-11. FIX ALL BUGS.
-12. REDEPLOY TO RAILWAY --- BACKEND DONE ✅
+10. PUT EVERYTHING TOGETHER IN A DEMO CALLED EAGLESPRESS-NEON USING NEON AND RENDER
+11. Generate a list of categories and their lookup keywords for Eaglespress
+12. FIX ALL BUGS.
+13. REDEPLOY TO RAILWAY --- BACKEND DONE ✅
